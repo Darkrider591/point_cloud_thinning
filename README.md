@@ -1,4 +1,4 @@
-# Thin_LAS 2.1 — Point Cloud Thinning & Scaling Tool
+# Point Cloud Thinning & Scaling Tool
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![GUI](https://img.shields.io/badge/GUI-egui%20%2F%20eframe-blue.svg)](https://github.com/emilk/egui)
