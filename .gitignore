@@ -1,0 +1,25 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock.backup
+
+# Large point cloud files (test datasets)
+*.las
+*.laz
+*.e57
+*.pts
+*.xyz
+*.ply
+
+# IDE & OS files
+.idea/
+.vscode/
+*.iml
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Temporary & log files
+*.log
+*.tmp
+*.bak

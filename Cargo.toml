@@ -1,0 +1,19 @@
+[package]
+name = "Thin_LAS_2_1"
+version = "2.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.22"
+egui = "0.22"
+las = "0.9.10"
+rfd = "0.12"
+anyhow = "1.0"
+roaring = "0.8"
+seahash = "4.1.0"
+winapi = { version = "0.3", features = ["winuser", "windef", "libloaderapi", "winbase", "winnt"] }
+e57 = "0.11"
+uuid = { version = "1", features = ["v4"] }
+
+[build-dependencies]
+winres = "0.1.12"
