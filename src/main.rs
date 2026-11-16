@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -101,6 +103,126 @@ fn format_duration(duration: Duration) -> String {
     } else {
         format!("{} сек", secs)
     }
+}
+
+// Форматирование чисел с разделителем тысяч пробелом (например, 163 375 183)
+fn format_number_with_spaces(mut n: usize) -> String {
+    if n == 0 {
+        return "0".to_string();
+    }
+    let mut s = String::new();
+    let mut count = 0;
+    while n > 0 {
+        if count > 0 && count % 3 == 0 {
+            s.push(' ');
+        }
+        s.push(char::from_digit((n % 10) as u32, 10).unwrap());
+        n /= 10;
+        count += 1;
+    }
+    s.chars().rev().collect()
+}
+
+// Форматирование размера файла (байты, КБ, МБ, ГБ)
+fn format_file_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.2} ГБ", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1} МБ", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{} КБ", bytes / 1024)
+    } else {
+        format!("{} байт", bytes)
+    }
+}
+
+// Быстрая выборка точек для оценки средней плотности (без чтения всего файла)
+fn sample_points_from_file(path: &Path, max_samples: usize) -> anyhow::Result<Vec<(f64, f64, f64)>> {
+    let fmt = detect_format(path).unwrap_or(PointCloudFormat::Las);
+    let mut points = Vec::with_capacity(max_samples);
+
+    match fmt {
+        PointCloudFormat::Las => {
+            let mut reader = Reader::from_path(path)?;
+            let total_pts = reader.header().number_of_points() as usize;
+            let num_blocks = 5;
+            let pts_per_block = (max_samples / num_blocks).max(2000);
+            let skip_between = if total_pts > 500_000 {
+                (total_pts / (num_blocks * 2)).clamp(10_000, 200_000)
+            } else {
+                0
+            };
+
+            let mut current_block_pts = 0;
+            let mut blocks_read = 0;
+
+            while let Some(pt) = reader.read_point()? {
+                points.push((pt.x, pt.y, pt.z));
+                current_block_pts += 1;
+                if current_block_pts >= pts_per_block {
+                    blocks_read += 1;
+                    current_block_pts = 0;
+                    if blocks_read >= num_blocks || points.len() >= max_samples {
+                        break;
+                    }
+                    for _ in 0..skip_between {
+                        if reader.read_point()?.is_none() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        PointCloudFormat::E57 => {
+            let mut reader = e57::E57Reader::from_file(path)?;
+            let pcs = reader.pointclouds();
+            let num_pcs = pcs.len().max(1);
+            let per_pc = (max_samples / num_pcs).clamp(1000, max_samples);
+
+            for pc in pcs {
+                let mut iter = reader.pointcloud_simple(&pc)?;
+                iter.spherical_to_cartesian(true);
+                iter.cartesian_to_spherical(false);
+                iter.apply_pose(true);
+
+                let num_blocks = 5;
+                let pts_per_block = (per_pc / num_blocks).max(2000);
+                let skip_between = if pc.records > 500_000 {
+                    ((pc.records as usize) / (num_blocks * 2)).clamp(10_000, 200_000)
+                } else {
+                    0
+                };
+
+                let mut current_block_pts = 0;
+                let mut blocks_read = 0;
+
+                while let Some(p) = iter.next() {
+                    let p = p?;
+                    if let e57::CartesianCoordinate::Valid { x, y, z } = p.cartesian {
+                        points.push((x, y, z));
+                        current_block_pts += 1;
+                        if current_block_pts >= pts_per_block {
+                            blocks_read += 1;
+                            current_block_pts = 0;
+                            if blocks_read >= num_blocks || points.len() >= max_samples {
+                                break;
+                            }
+                            for _ in 0..skip_between {
+                                if iter.next().is_none() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if points.len() >= max_samples {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(points)
 }
 
 // Копирование фотопанорам и изображений (images2D) из исходного E57 в результирующий
@@ -491,13 +613,13 @@ where
     log("Копирование фотопанорам и привязка к децимированным сканам...");
     progress(90.0);
     let copied_images = copy_e57_images(&mut reader, &mut e57_writer, &guid_map, scale_factor)?;
-    log(&format!("✔️ Скопировано фотопанорам: {}", copied_images));
+    log(&format!("Скопировано фотопанорам: {}", copied_images));
 
     progress(98.0);
     e57_writer.finalize()?;
 
     let duration = start_time.elapsed().as_secs_f32();
-    log(&format!("✔️ Всего точек записано в результирующий файл: {}", written));
+    log(&format!("Всего точек записано в результирующий файл: {}", format_number_with_spaces(written)));
     log(&format!(
         "[Конец] Децимация структурированного E57 завершена за {:.2} сек.",
         duration
@@ -643,13 +765,13 @@ where
     }
     let copied_images = copy_e57_images(&mut reader, &mut e57_writer, &guid_map, scale_factor)?;
     if copied_images > 0 {
-        log(&format!("✔️ Скопировано фотопанорам: {}", copied_images));
+        log(&format!("Скопировано фотопанорам: {}", copied_images));
     }
 
     e57_writer.finalize()?;
 
     let duration = start_time.elapsed().as_secs_f32();
-    log(&format!("✔️ Записано точек: {}", written));
+    log(&format!("Записано точек: {}", format_number_with_spaces(written)));
     log(&format!("[Конец] Обработка завершена за {:.2} сек.", duration));
 
     Ok(written)
@@ -715,7 +837,7 @@ where
     }
 
     let duration = start_time.elapsed().as_secs_f32();
-    log(&format!("✔️ Записано точек: {}", written));
+    log(&format!("Записано точек: {}", format_number_with_spaces(written)));
     log(&format!("[Конец] Обработка завершена за {:.2} сек.", duration));
 
     Ok(written)
@@ -820,7 +942,7 @@ where
     e57_writer.finalize()?;
 
     let duration = start_time.elapsed().as_secs_f32();
-    log(&format!("✔️ Записано точек: {}", written));
+    log(&format!("Записано точек: {}", format_number_with_spaces(written)));
     log(&format!("[Конец] Обработка завершена за {:.2} сек.", duration));
 
     Ok(written)
@@ -956,7 +1078,7 @@ where
     }
 
     let duration = start_time.elapsed().as_secs_f32();
-    log(&format!("✔️ Записано точек: {}", written));
+    log(&format!("Записано точек: {}", format_number_with_spaces(written)));
     log(&format!("[Конец] Обработка завершена за {:.2} сек.", duration));
 
     Ok(written)
@@ -1043,6 +1165,13 @@ struct ThinLasApp {
     thinning_method: ThinningMethod,
     input_file: Option<PathBuf>,
     output_file: Option<PathBuf>,
+    source_file_size: u64,
+    sample_points: Vec<(f64, f64, f64)>,
+    cached_eval_voxel_size: f64,
+    cached_reduction_pct: f64,
+    cached_est_bytes: u64,
+    cloud_surface_area: Option<f64>,
+    density_eval_status: Option<String>,
     log: String,
     source_version: Option<String>,
     source_point_count: usize,
@@ -1056,14 +1185,21 @@ struct ThinLasApp {
 impl Default for ThinLasApp {
     fn default() -> Self {
         Self {
-            voxel_size: 0.05,           // Шаг прореживания по умолчанию = 0.0500 м или 50 мм
+            voxel_size: 0.05,           // Шаг прореживания по умолчанию = 0.050 м или 50 мм
             scale_factor: 1.0,          // Масштаб = 1.0
-            use_thinning: false,         // "Включить прореживание" = выключено по умолчанию
-            use_scaling: false,          // "Включить масштабирование" = выключено по умолчанию
+            use_thinning: false,        // "Включить прореживание" = выключено по умолчанию
+            use_scaling: false,         // "Включить масштабирование" = выключено по умолчанию
             grid_stride_k: 2,           // Шаг сетки k = 2 (по умолчанию в 4 раза меньше)
             thinning_method: ThinningMethod::VoxelGrid,
             input_file: None,
             output_file: None,
+            source_file_size: 0,
+            sample_points: Vec::new(),
+            cached_eval_voxel_size: 0.0,
+            cached_reduction_pct: 0.0,
+            cached_est_bytes: 0,
+            cloud_surface_area: None,
+            density_eval_status: None,
             log: String::new(),
             source_version: None,
             source_point_count: 0,
@@ -1096,18 +1232,18 @@ impl eframe::App for ThinLasApp {
                         self.result_point_count = result_point_count;
                         self.elapsed_time = elapsed;
                         self.progress = 100.0;
-                        self.log.push_str("✅ Обработка завершена!\n");
+                        self.log.push_str("Обработка завершена.\n");
 
                         if scale != 1.0 {
                             self.log.push_str(&format!(
-                                "📏 Применён коэффициент масштабирования: {:.4}x\n",
+                                "Применен коэффициент масштабирования: {:.3}x\n",
                                 scale
                             ));
                         }
                         self.is_processing = false;
                     }
                     WorkerMsg::Error(err) => {
-                        self.log.push_str(&format!("❌ Ошибка: {}\n", err));
+                        self.log.push_str(&format!("Ошибка: {}\n", err));
                         self.is_processing = false;
                     }
                 }
@@ -1119,7 +1255,7 @@ impl eframe::App for ThinLasApp {
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("📁 Выбрать входной файл").clicked() {
+                if ui.button("Выбрать входной файл").clicked() {
                     if let Some(path) = FileDialog::new()
                         .add_filter("Облака точек (*.las, *.laz, *.e57)", &["las", "laz", "e57"])
                         .add_filter("E57 (*.e57)", &["e57"])
@@ -1130,6 +1266,13 @@ impl eframe::App for ThinLasApp {
                         self.input_file = Some(path.clone());
                         self.source_version = None;
                         self.source_point_count = 0;
+                        self.source_file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        self.sample_points.clear();
+                        self.cached_eval_voxel_size = 0.0;
+                        self.cached_reduction_pct = 0.0;
+                        self.cached_est_bytes = 0;
+                        self.cloud_surface_area = None;
+                        self.density_eval_status = None;
 
                         let format_hint = detect_format(&path);
 
@@ -1141,6 +1284,31 @@ impl eframe::App for ThinLasApp {
                                 let is_structured = reader.pointclouds().iter().any(|pc| pc.has_row_column());
                                 let total_points: u64 =
                                     reader.pointclouds().iter().map(|pc| pc.records).sum();
+
+                                // Извлечение габаритов (bounding box) для точного расчета физической площади поверхностей
+                                let mut min_x = f64::MAX; let mut max_x = f64::MIN;
+                                let mut min_y = f64::MAX; let mut max_y = f64::MIN;
+                                let mut min_z = f64::MAX; let mut max_z = f64::MIN;
+                                let mut has_bounds = false;
+                                for pc in reader.pointclouds() {
+                                    if let Some(bounds) = pc.get_cartesian_bounds() {
+                                        if let (Some(x0), Some(x1), Some(y0), Some(y1), Some(z0), Some(z1)) = (
+                                            bounds.x_min, bounds.x_max, bounds.y_min, bounds.y_max, bounds.z_min, bounds.z_max
+                                        ) {
+                                            min_x = min_x.min(x0); max_x = max_x.max(x1);
+                                            min_y = min_y.min(y0); max_y = max_y.max(y1);
+                                            min_z = min_z.min(z0); max_z = max_z.max(z1);
+                                            has_bounds = true;
+                                        }
+                                    }
+                                }
+                                if has_bounds && max_x > min_x && max_y > min_y {
+                                    let dx = max_x - min_x;
+                                    let dy = max_y - min_y;
+                                    let dz = (max_z - min_z).abs().max(0.1);
+                                    let s_box = 2.0 * (dx * dy + dx * dz + dy * dz);
+                                    self.cloud_surface_area = Some(s_box);
+                                }
 
                                 let version = if is_structured {
                                     format!("E57 (структурированный, сканов: {}, панорам: {})", pc_count, image_count)
@@ -1169,6 +1337,17 @@ impl eframe::App for ThinLasApp {
                                     reader.header().version().major,
                                     reader.header().version().minor
                                 );
+                                let b = reader.header().bounds();
+                                let min_x = b.min.x; let max_x = b.max.x;
+                                let min_y = b.min.y; let max_y = b.max.y;
+                                let min_z = b.min.z; let max_z = b.max.z;
+                                if max_x > min_x && max_y > min_y {
+                                    let dx = max_x - min_x;
+                                    let dy = max_y - min_y;
+                                    let dz = (max_z - min_z).abs().max(0.1);
+                                    let s_box = 2.0 * (dx * dy + dx * dz + dy * dz);
+                                    self.cloud_surface_area = Some(s_box);
+                                }
                                 self.source_version = Some(version);
                                 self.source_point_count = reader.header().number_of_points() as usize;
                                 self.thinning_method = ThinningMethod::VoxelGrid;
@@ -1177,7 +1356,7 @@ impl eframe::App for ThinLasApp {
                     }
                 }
 
-                if ui.button("💾 Сохранить результат").clicked() {
+                if ui.button("Сохранить результат").clicked() {
                     let mut dialog = FileDialog::new();
                     let default_ext = if let Some(input) = &self.input_file {
                         if detect_format(input) == Some(PointCloudFormat::E57) {
@@ -1237,13 +1416,13 @@ impl eframe::App for ThinLasApp {
                         let mut method_grid = self.thinning_method == ThinningMethod::GridStride && is_struct_e57;
                         let resp_grid = ui.add_enabled(
                             is_struct_e57,
-                            egui::Checkbox::new(&mut method_grid, "📐 По коэффициенту сетки (с сохранением фотопанорам от 1-го лица)")
+                            egui::Checkbox::new(&mut method_grid, "По коэффициенту сетки (с сохранением фотопанорам от 1-го лица)")
                         );
                         if resp_grid.clicked() {
                             self.thinning_method = ThinningMethod::GridStride;
                         }
                         resp_grid.on_hover_text(
-                            "Субдискретизация 2D-сетки сканера с шагом k × k.\n\
+                            "Субдискретизация 2D-сетки сканера с шагом k x k.\n\
                              • Сохраняет матричную структуру скана (строки и столбцы).\n\
                              • 100% перенос фотопанорам от 1-го лица (Bubble View / RealView для САПР).\n\
                              • Физически уменьшает размер файла и число точек в k² раз (в 4, 9, 16... раз)."
@@ -1251,14 +1430,14 @@ impl eframe::App for ThinLasApp {
 
                         if !is_struct_e57 {
                             ui.label(
-                                egui::RichText::new("  ↳ Затемнено: недоступно для LAS и неструктурированных E57 (нет сетки сканера и фотопанорам)")
+                                egui::RichText::new("   Недоступно для LAS и неструктурированных E57 (нет сетки сканера и фотопанорам)")
                                     .small()
                                     .italics()
                                     .color(egui::Color32::from_rgb(180, 180, 180))
                             );
                         } else {
                             ui.label(
-                                egui::RichText::new("  ↳ Децимация сетки k×k: сохраняет структуру скана и панорамы Bubble View, снижает размер в k² раз")
+                                egui::RichText::new("   Децимация сетки k x k: сохраняет структуру скана и панорамы Bubble View, снижает размер в k² раз")
                                     .small()
                                     .color(egui::Color32::from_rgb(120, 220, 120))
                             );
@@ -1269,7 +1448,7 @@ impl eframe::App for ThinLasApp {
                         // Вариант 2: По среднему расстоянию (3D-сетка вокселей)
                         let mut method_voxel = self.thinning_method == ThinningMethod::VoxelGrid;
                         let resp_voxel = ui.add(
-                            egui::Checkbox::new(&mut method_voxel, "🌐 По среднему расстоянию (3D-сетка вокселей, как было ранее)")
+                            egui::Checkbox::new(&mut method_voxel, "По среднему расстоянию (3D-сетка вокселей)")
                         );
                         if resp_voxel.clicked() {
                             self.thinning_method = ThinningMethod::VoxelGrid;
@@ -1281,7 +1460,7 @@ impl eframe::App for ThinLasApp {
                              • Универсально работает для всех форматов (LAS, LAZ, E57)."
                         );
                         ui.label(
-                            egui::RichText::new("  ↳ 3D-сетка: равномерное среднее расстояние между точками в метрах (универсально для LAS и E57)")
+                            egui::RichText::new("   3D-сетка: равномерное среднее расстояние между точками в метрах (универсально для LAS и E57)")
                                 .small()
                                 .color(egui::Color32::from_rgb(160, 200, 255))
                         );
@@ -1294,7 +1473,7 @@ impl eframe::App for ThinLasApp {
                         ui.group(|ui| {
                             ui.label(
                                 egui::RichText::new(
-                                    "Параметры децимации сетки сканера (Вариант 1):",
+                                    "Параметры децимации сетки сканера:",
                                 )
                                 .strong()
                                 .color(egui::Color32::from_rgb(100, 200, 255)),
@@ -1314,13 +1493,27 @@ impl eframe::App for ThinLasApp {
                             ui.label(format!("• Прореживание: каждая {}-я строка и {}-я колонка матрицы скана", k, k));
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "• Точек и размер файла: В {} РАЗ МЕНЬШЕ (-{:.1}%)",
+                                    "• Точек и размер файла: в {} раз меньше (-{:.1}%)",
                                     factor, reduction
                                 ))
                                 .strong()
                                 .color(egui::Color32::from_rgb(120, 255, 120)),
                             );
-                            ui.label("• Топология 2D-сетки и фотопанорамы от 1-го лица (RealView) полностью сохраняются!");
+
+                            if self.source_file_size > 0 {
+                                let est_bytes = ((self.source_file_size as f64) / (factor as f64)).round() as u64;
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "• Рассчетный размер файла: {} (сокращение на {:.1}%)",
+                                        format_file_size(est_bytes),
+                                        reduction
+                                    ))
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(100, 220, 255)),
+                                );
+                            }
+
+                            ui.label("• Топология 2D-сетки и фотопанорамы от 1-го лица (RealView) полностью сохраняются.");
                         });
                     } else {
                         ui.group(|ui| {
@@ -1337,11 +1530,144 @@ impl eframe::App for ThinLasApp {
                                 ui.add(
                                     egui::Slider::new(&mut self.voxel_size, 0.001..=10.0)
                                         .text("м")
+                                        .step_by(0.001)
+                                        .max_decimals(3)
                                         .logarithmic(true),
                                 );
                             });
                             let mm = (self.voxel_size * 1000.0).round() as i64;
-                            ui.label(format!("• Текущее среднее расстояние: {:.4} м ({} мм)", self.voxel_size, mm));
+                            ui.label(format!("• Текущее среднее расстояние: {:.3} м ({} мм)", self.voxel_size, mm));
+
+                            ui.add_space(4.0);
+
+                            // Кнопка оценки средней плотности
+                            let can_eval = self.input_file.is_some() && !self.is_processing;
+                            ui.horizontal(|ui| {
+                                if ui.add_enabled(can_eval, egui::Button::new("Оценка средней плотности")).clicked() {
+                                    if let Some(ref path) = self.input_file {
+                                        match sample_points_from_file(path, 100_000) {
+                                            Ok(pts) => {
+                                                let count = pts.len();
+                                                if self.cloud_surface_area.is_none() && !pts.is_empty() {
+                                                    let mut min_x = f64::MAX; let mut max_x = f64::MIN;
+                                                    let mut min_y = f64::MAX; let mut max_y = f64::MIN;
+                                                    let mut min_z = f64::MAX; let mut max_z = f64::MIN;
+                                                    for &(x, y, z) in &pts {
+                                                        min_x = min_x.min(x); max_x = max_x.max(x);
+                                                        min_y = min_y.min(y); max_y = max_y.max(y);
+                                                        min_z = min_z.min(z); max_z = max_z.max(z);
+                                                    }
+                                                    if max_x > min_x && max_y > min_y {
+                                                        let dx = max_x - min_x;
+                                                        let dy = max_y - min_y;
+                                                        let dz = (max_z - min_z).abs().max(0.1);
+                                                        self.cloud_surface_area = Some(2.0 * (dx * dy + dx * dz + dy * dz));
+                                                    }
+                                                }
+                                                self.sample_points = pts;
+                                                self.cached_eval_voxel_size = 0.0;
+                                                let density_msg = if let Some(s) = self.cloud_surface_area {
+                                                    let n = self.source_point_count as f64;
+                                                    let avg_dens = n / s;
+                                                    let avg_dist_mm = (1.0 / avg_dens.sqrt()) * 1000.0;
+                                                    format!(
+                                                        "Средняя плотность: ~{:.0} точ./м² (средний шаг ~{:.1} мм), выборка {}",
+                                                        avg_dens, avg_dist_mm, format_number_with_spaces(count)
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "Оценка выполнена по выборке из {} точек",
+                                                        format_number_with_spaces(count)
+                                                    )
+                                                };
+                                                self.density_eval_status = Some(density_msg);
+                                            }
+                                            Err(e) => {
+                                                self.density_eval_status = Some(format!("Ошибка оценки: {}", e));
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if let Some(ref status) = self.density_eval_status {
+                                    ui.label(egui::RichText::new(status).small().color(egui::Color32::from_rgb(180, 200, 220)));
+                                }
+                            });
+
+                            // Расчетный размер файла на основе физической модели поверхности и вокселей
+                            if !self.sample_points.is_empty() || self.cloud_surface_area.is_some() {
+                                if (self.voxel_size - self.cached_eval_voxel_size).abs() > 1e-6 || self.cached_eval_voxel_size == 0.0 {
+                                    let ratio = if let Some(s) = self.cloud_surface_area {
+                                        if s > 0.0 && self.source_point_count > 0 {
+                                            let n = self.source_point_count as f64;
+                                            let lambda = (n * self.voxel_size * self.voxel_size) / s;
+                                            if lambda > 1e-6 {
+                                                ((1.0 - (-lambda).exp()) / lambda).clamp(0.0001, 1.0)
+                                            } else {
+                                                1.0
+                                            }
+                                        } else {
+                                            1.0
+                                        }
+                                    } else {
+                                        let mut seen = RoaringBitmap::new();
+                                        let mut kept = 0;
+                                        for &(x, y, z) in &self.sample_points {
+                                            let key = (
+                                                (x / self.voxel_size).round() as i64,
+                                                (y / self.voxel_size).round() as i64,
+                                                (z / self.voxel_size).round() as i64,
+                                            );
+                                            let hash = hash_voxel(&key);
+                                            if !seen.contains(hash as u32) {
+                                                seen.insert(hash as u32);
+                                                kept += 1;
+                                            }
+                                        }
+                                        kept as f64 / self.sample_points.len().max(1) as f64
+                                    };
+
+                                    self.cached_reduction_pct = (1.0 - ratio) * 100.0;
+                                    self.cached_est_bytes = if self.source_file_size > 0 {
+                                        ((self.source_file_size as f64) * ratio).round() as u64
+                                    } else {
+                                        0
+                                    };
+                                    self.cached_eval_voxel_size = self.voxel_size;
+                                }
+
+                                let reduction_pct = self.cached_reduction_pct;
+                                let est_bytes = self.cached_est_bytes;
+
+                                if reduction_pct < 2.0 {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "• Рассчетный размер файла: {} (сокращение ~{:.1}% — шаг слишком мал, размер практически не уменьшится)",
+                                            format_file_size(est_bytes),
+                                            reduction_pct
+                                        ))
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(255, 180, 100)),
+                                    );
+                                } else {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "• Рассчетный размер файла: {} (сокращение ~{:.1}%)",
+                                            format_file_size(est_bytes),
+                                            reduction_pct
+                                        ))
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(100, 220, 255)),
+                                    );
+                                }
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("• Рассчетный размер файла: нажмите кнопку «Оценка средней плотности»")
+                                        .italics()
+                                        .color(egui::Color32::from_rgb(160, 160, 160)),
+                                );
+                            }
+
                             ui.label("• Пространство разбивается на 3D-кубы (воксели), в каждом остаётся одна точка.");
                         });
                     }
@@ -1357,7 +1683,7 @@ impl eframe::App for ThinLasApp {
                             .text("Коэффициент масштаба")
                             .logarithmic(true),
                     );
-                    ui.label(format!("Текущий коэффициент: {:.4}", self.scale_factor));
+                    ui.label(format!("Текущий коэффициент: {:.3}", self.scale_factor));
                     ui.label("• < 1.0 — уменьшение облака");
                     ui.label("• = 1.0 — без изменений");
                     ui.label("• > 1.0 — увеличение облака");
@@ -1370,7 +1696,7 @@ impl eframe::App for ThinLasApp {
                 && self.input_file != self.output_file
                 && !self.is_processing;
 
-            if ui.add_enabled(can_process, egui::Button::new("🚀 Начать обработку")).clicked() {
+            if ui.add_enabled(can_process, egui::Button::new("Начать обработку")).clicked() {
                 let input = self.input_file.as_ref().unwrap().clone();
                 let output = self.output_file.as_ref().unwrap().clone();
 
@@ -1429,28 +1755,28 @@ impl eframe::App for ThinLasApp {
             }
 
             if self.is_processing {
-                ui.label("⏳ Идёт обработка...");
+                ui.label("Идет обработка...");
                 let progress = self.progress;
                 ui.add(egui::ProgressBar::new(progress / 100.0).text(format!("{:.2}%", progress)));
             }
 
             // Путь к файлам
             if let Some(input) = &self.input_file {
-                ui.label(format!("📥 Входной файл: {}", input.display()));
+                ui.label(format!("Входной файл: {}", input.display()));
             }
             if let Some(output) = &self.output_file {
-                ui.label(format!("📤 Выходной файл: {}", output.display()));
+                ui.label(format!("Выходной файл: {}", output.display()));
             }
 
             // Информация о файлах
             if let Some(version) = &self.source_version {
-                ui.label(format!("📦 Формат исходного файла: {}", version));
+                ui.label(format!("Формат исходного файла: {}", version));
             } else {
-                ui.label("📦 Формат исходного файла: не определён");
+                ui.label("Формат исходного файла: не определен");
             }
 
             if self.source_point_count > 0 {
-                ui.label(format!("🔢 Всего точек/ячеек в исходном файле: {}", self.source_point_count));
+                ui.label(format!("Всего точек/ячеек в исходном файле: {}", format_number_with_spaces(self.source_point_count)));
             }
 
             if self.result_point_count > 0 {
@@ -1461,27 +1787,25 @@ impl eframe::App for ThinLasApp {
                 };
                 let time_str = format_duration(self.elapsed_time);
 
-                ui.label(format!("✅ Активных точек в результате: {}", self.result_point_count));
+                ui.label(format!("Активных точек в результате: {}", format_number_with_spaces(self.result_point_count)));
                 if self.use_thinning {
-                    ui.label(format!("📉 Сокращение данных: {:.2}%", reduction_percent));
+                    ui.label(format!("Сокращение данных: {:.2}%", reduction_percent));
                 }
                 if self.use_scaling && self.scale_factor != 1.0 {
-                    ui.label(format!("📏 Масштаб: {:.4}x", self.scale_factor));
+                    ui.label(format!("Масштаб: {:.3}x", self.scale_factor));
                 }
-                ui.label(format!("⏱️ Время выполнения: {}", time_str));
+                ui.label(format!("Время выполнения: {}", time_str));
             }
 
             // Цветное логирование
             egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                 for line in self.log.lines() {
-                    if line.contains("❌") {
+                    if line.contains("Ошибка") {
                         ui.colored_label(egui::Color32::RED, line);
-                    } else if line.contains("✅") || line.contains("✔️") {
+                    } else if line.contains("завершена") || line.contains("Записано") || line.contains("записано") {
                         ui.colored_label(egui::Color32::GREEN, line);
-                    } else if line.contains("📏") {
+                    } else if line.contains("Масштаб") {
                         ui.colored_label(egui::Color32::BLUE, line);
-                    } else if line.contains("⏳") {
-                        ui.colored_label(egui::Color32::YELLOW, line);
                     } else {
                         ui.label(line);
                     }
@@ -1491,11 +1815,24 @@ impl eframe::App for ThinLasApp {
     }
 }
 
+fn load_icon() -> Option<eframe::IconData> {
+    let icon_bytes = include_bytes!("../icon.ico");
+    let img = image::load_from_memory(icon_bytes).ok()?.into_rgba8();
+    let (width, height) = img.dimensions();
+    let rgba = img.into_raw();
+    Some(eframe::IconData {
+        rgba,
+        width,
+        height,
+    })
+}
+
 // Точка входа
 fn main() {
-    let options = eframe::NativeOptions::default();
+    let mut options = eframe::NativeOptions::default();
+    options.icon_data = load_icon();
     if let Err(error) = eframe::run_native(
-        "Thin_LAS_2.1",
+        "Thin_LAS_2.2",
         options,
         Box::new(|_cc| Box::new(ThinLasApp::default())),
     ) {
@@ -1740,5 +2077,39 @@ mod tests {
 
         assert_eq!(written, 1);
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_format_number_with_spaces() {
+        assert_eq!(format_number_with_spaces(0), "0");
+        assert_eq!(format_number_with_spaces(999), "999");
+        assert_eq!(format_number_with_spaces(1000), "1 000");
+        assert_eq!(format_number_with_spaces(163375183), "163 375 183");
+        assert_eq!(format_number_with_spaces(160305070), "160 305 070");
+    }
+
+    #[test]
+    fn test_format_file_size() {
+        assert_eq!(format_file_size(500), "500 байт");
+        assert_eq!(format_file_size(2048), "2 КБ");
+        assert_eq!(format_file_size(10 * 1024 * 1024), "10.0 МБ");
+        assert_eq!(format_file_size(4_559_309 * 1024), "4.35 ГБ");
+    }
+
+    #[test]
+    fn test_density_model_prediction() {
+        let n: f64 = 163_375_183.0;
+        let s_box: f64 = 14037.0;
+        // Test 20mm (voxel = 0.020)
+        let lambda_20: f64 = (n * 0.020 * 0.020) / s_box;
+        let ratio_20 = (1.0 - (-lambda_20).exp()) / lambda_20;
+        let red_20 = (1.0 - ratio_20) * 100.0;
+        assert!(red_20 > 75.0 && red_20 < 82.0, "Expected ~79% reduction at 20mm, got {:.1}%", red_20);
+
+        // Test 8mm (voxel = 0.008)
+        let lambda_8: f64 = (n * 0.008 * 0.008) / s_box;
+        let ratio_8 = (1.0 - (-lambda_8).exp()) / lambda_8;
+        let red_8 = (1.0 - ratio_8) * 100.0;
+        assert!(red_8 > 25.0 && red_8 < 35.0, "Expected ~29% reduction at 8mm, got {:.1}%", red_8);
     }
 }
