@@ -1,5 +1,5 @@
 [package]
-name = "Thin_LAS_2_3"
+name = "Point_Cloud_Tools"
 version = "2.3.0"
 edition = "2021"
 

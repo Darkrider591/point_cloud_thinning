@@ -3854,7 +3854,7 @@ fn main() {
     options.initial_window_size = Some(egui::vec2(1060.0, 860.0));
     options.min_window_size = Some(egui::vec2(680.0, 600.0));
     if let Err(error) = eframe::run_native(
-        "Thin_LAS 2.3",
+        "Point Cloud Tools 2.3",
         options,
         Box::new(|_cc| Box::new(ThinLasApp::default())),
     ) {
