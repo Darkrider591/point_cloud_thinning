@@ -1,6 +1,6 @@
 [package]
-name = "Thin_LAS_2_2"
-version = "2.2.0"
+name = "Point_Cloud_Tools"
+version = "2.3.0"
 edition = "2021"
 
 [dependencies]
@@ -12,9 +12,10 @@ anyhow = "1.0"
 roaring = "0.8"
 seahash = "4.1.0"
 winapi = { version = "0.3", features = ["winuser", "windef", "libloaderapi", "winbase", "winnt"] }
-e57 = "0.11"
+e57 = { version = "0.11", features = ["crc32c"] }
 uuid = { version = "1", features = ["v4"] }
 image = { version = "0.24", default-features = false, features = ["ico", "png"] }
+rayon = "1.8"
 
 [build-dependencies]
 winres = "0.1.12"
